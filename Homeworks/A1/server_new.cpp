@@ -6,11 +6,19 @@
 #include<thread>
 #include<mutex>
 #include <cstring>
+#include<vector>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
-
+#include <bits/stdc++.h>
 //Things to keep in mind... client leaves by ctrl+C... try to use classes last mein
+//Give the user mmlist of all groups, active users and groups user is in
+//handle leave server fr grps coz socket num can change on rejoin ---done
+//handle empty grps ---done
+//Use locks on common resources
+// use limits on number of users, groups and stuff
+// use sstream in load cred for other string parsing stuff
+// have general messages like a broadcast when a user joins or leaves, grpmsg when a user joins a group enol... also think of couts to server when a grp is created or sestroyed
 
 #define PORT 12345
 #define BUFFER_SIZE 1024
@@ -20,6 +28,9 @@ using namespace std;
 map<string,string>cred;
 map<string,int>active;
 map<int,string>active_inv;
+map<string,vector<int>>groups;
+map<int,vector<string>>grp_ind;
+
 //Function to load credentials
 int load_cred(string fname){
     cred.clear();
@@ -27,7 +38,7 @@ int load_cred(string fname){
     fstream file (fname,ios::in);
     if(file.is_open()){
         while(getline(file, line)){
-            line.pop_back();
+            if(line[line.length()-1]==13) line.pop_back();
             stringstream str(line);
             //cout<<line<<endl;
             getline(str, username, ':');
@@ -48,6 +59,13 @@ int load_cred(string fname){
 //Function to handle a client leaving
 void leave(int client_socket){
     string username=active_inv[client_socket];
+    //Leaving all groups... think of handle grp being empty here as well??
+    for(auto it: grp_ind[client_socket]){
+        groups[it].erase(find(groups[it].begin(),groups[it].end(),client_socket));
+        if(groups[it].empty()){
+            groups.erase(it);
+        }
+    }
     active.erase(username);
     active_inv.erase(client_socket);
     cout<<username+" has exited"<<endl;
@@ -57,6 +75,7 @@ void leave(int client_socket){
 //Function to process the commands
 void process_command(int client_socket, const std::string& command) {
     string cmd="", msg="";
+    int flag;
     size_t spacePos = command.find(' '); // Find first space
     if (spacePos != std::string::npos) {
         cmd = command.substr(0, spacePos); 
@@ -99,7 +118,7 @@ void process_command(int client_socket, const std::string& command) {
     }
     else if (cmd == "/broadcast") {
         message= "broadcast>> "+active_inv[client_socket]+": "+msg;
-        int flag=1;
+        flag=1;
         for(auto it:active){
             if(it.second!=client_socket){
                 if(!(send(it.second, message.c_str(), message.size(), 0))){
@@ -115,28 +134,103 @@ void process_command(int client_socket, const std::string& command) {
             send(client_socket, message.c_str(), message.size(), 0);
         }
     }
-    // else if (cmd == "/group_msg") {
-    //     std::string group_name, message;
-    //     iss >> group_name;
-    //     std::getline(iss, message);
-    //     if (!message.empty()) message = message.substr(1);
-    //     send_group_message(active_clients[client_socket].username, group_name, message);
-    // }
-    // else if (cmd == "/create_group") {
-    //     std::string group_name;
-    //     iss >> group_name;
-    //     create_group(active_clients[client_socket].username, group_name);
-    // }
-    // else if (cmd == "/join_group") {
-    //     std::string group_name;
-    //     iss >> group_name;
-    //     join_group(active_clients[client_socket].username, group_name);
-    // }
-    // else if (cmd == "/leave_group") {
-    //     std::string group_name;
-    //     iss >> group_name;
-    //     leave_group(active_clients[client_socket].username, group_name);
-    // }
+    else if (cmd == "/group_msg") {
+        string grpname = "";
+        size_t spacePos = msg.find(' '); // Find first space
+        if (spacePos != std::string::npos) {
+            grpname = msg.substr(0, spacePos); 
+            message = msg.substr(spacePos+1, command.length());// Extract first word
+        }
+        else{
+            message="The message does not follow the standards";
+            send(client_socket, message.c_str(), message.size(), 0);
+            return;
+        }
+        if(message.empty()){
+            message="The message does not follow the standards\n";
+            send(client_socket, message.c_str(), message.size(), 0);
+            return;
+        }
+        if(groups.find(grpname)==groups.end()){
+            message = "This group does not exist!!";
+            send(client_socket, message.c_str(), message.size(),0);
+            return;
+        }
+        if(find(groups[grpname].begin(),groups[grpname].end(),client_socket)==groups[grpname].end()){
+            message = "You are not a part of this group";
+            send(client_socket, message.c_str(), message.size(),0);
+            return;
+        }
+        message="["+grpname+"] "+active_inv[client_socket]+": "+message;
+        flag=1;
+        for(auto it:groups[grpname]){
+            if(it!=client_socket){
+                if(!(send(it, message.c_str(), message.size(), 0))){
+                    message = "Oops!";
+                    send(client_socket, message.c_str(), message.size(), 0);
+                    flag=0;
+                    break;
+                }
+            }
+        }
+        if(flag==1){
+            message = "Your group message has been sent!";
+            send(client_socket, message.c_str(), message.size(), 0);
+        }  
+    }
+    else if (cmd == "/create_group") {
+        //checking if group already exists
+        if(groups.find(msg)!=groups.end()){
+            message = "This group already exists";
+            send(client_socket, message.c_str(), message.size(),0);
+            return;
+        }
+        groups[msg].push_back(client_socket);
+        grp_ind[client_socket].push_back(msg);
+        message = "["+ msg + "] group has been created.";
+        send(client_socket, message.c_str(), message.size(),0);
+    }
+    else if (cmd == "/join_group") {
+        if(groups.find(msg)!=groups.end()){
+            if (std::find(groups[msg].begin(), groups[msg].end(), client_socket) == groups[msg].end()) {
+                groups[msg].push_back(client_socket);
+                grp_ind[client_socket].push_back(msg);
+                message = "You have been added to the group.";
+                send(client_socket, message.c_str(), message.size(), 0);
+            }
+            else{
+                std::string errmsg = "You have already joined the group " + msg;
+                send(client_socket, errmsg.c_str(), errmsg.size(), 0);
+            }
+        }
+        else{
+            message = "This group does not exist!!";
+            send(client_socket, message.c_str(), message.size(),0);
+        }
+    }
+    else if (cmd == "/leave_group") {
+        if(groups.find(msg)!=groups.end()){
+            if (std::find(groups[msg].begin(), groups[msg].end(), client_socket) != groups[msg].end()) {
+                groups[msg].erase(find(groups[msg].begin(),groups[msg].end(),client_socket));
+                grp_ind[client_socket].erase(find(grp_ind[client_socket].begin(),grp_ind[client_socket].end(),msg));
+                message = "You have successfully left the group ["+ msg+"]";
+                send(client_socket, message.c_str(), message.size(), 0);
+                if(groups[msg].empty()){
+                    groups.erase(msg);
+                    message = "The group ["+ msg+"] is empty and hence has been erased";
+                    send(client_socket, message.c_str(), message.size(), 0);
+                }
+            }
+            else{
+                message = "You are not a part of the group " + msg;
+                send(client_socket, message.c_str(), message.size(), 0);
+            }
+        }
+        else{
+            message = "This group does not exist!!";
+            send(client_socket, message.c_str(), message.size(),0);
+        }
+    }
     else if (cmd == "/help") {
         std::string help_message = 
             "Available commands:\n"
